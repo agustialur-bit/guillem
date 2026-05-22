@@ -6,7 +6,7 @@ import urllib.request
 import json, re, sqlite3, os
 from datetime import datetime
 
-st.set_page_config(page_title="Guillem Analítica", page_icon="🏀", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Miki Analítica", page_icon="🏀", layout="wide", initial_sidebar_state="expanded")
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historic.db")
 API_BASE = "https://msstats.optimalwayconsulting.com/v1/fcbq/getJsonWithMatchMoves/{match_id}?currentSeason=true"
@@ -138,6 +138,15 @@ def init_db():
         val1_made INTEGER, val1_miss INTEGER,
         val2_made INTEGER, val2_miss INTEGER,
         val3_made INTEGER, val3_miss INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS timeouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id TEXT, data_consulta TEXT,
+        equip_nom TEXT, quart INTEGER,
+        min_timeout REAL, min_cistella REAL,
+        segons_resposta REAL,
+        jugadora TEXT, accio TEXT,
+        va_anotar INTEGER
     );
     CREATE TABLE IF NOT EXISTS equips (
         id_equip TEXT PRIMARY KEY, nom TEXT
@@ -292,17 +301,83 @@ def load_shots_zones_db():
 
 def delete_partit_db(match_id):
     con = sqlite3.connect(DB_PATH)
-    for tbl in ["partits","jugades","stats_jugador","shots_zones"]:
+    for tbl in ["partits","jugades","stats_jugador","shots_zones","timeouts"]:
         con.execute(f"DELETE FROM {tbl} WHERE match_id=?", (match_id,))
     con.commit(); con.close()
 
 init_db()
+
+# ── Funcions de temps morts ────────────────────────────────────────────────
+MINS_PER_QUART = 10
+
+def analyze_timeouts(df, team_names):
+    results = []
+    moves = df.to_dict('records')
+    for i, m in enumerate(moves):
+        if 'Temps mort' not in str(m.get('accio','')):
+            continue
+        eq_id  = m.get('idEquip','')
+        quart  = int(m.get('quart',1)) if m.get('quart','') != '' else 1
+        min_to = float(m.get('min_num',0))
+        min_abs_to = (quart-1)*MINS_PER_QUART + min_to
+        eq_nom = team_names.get(str(eq_id),'?')
+        va_anotar = 0; jugadora = ''; accio_cist = ''; mins_cist = None
+        for j in range(i+1, len(moves)):
+            nm = moves[j]
+            q_next = int(nm.get('quart',1)) if nm.get('quart','') != '' else 1
+            if q_next != quart: break
+            move_str = str(nm.get('accio',''))
+            if nm.get('idEquip','') == eq_id and any(c in move_str for c in ['Cistella de 1','Cistella de 2','Cistella de 3']):
+                min_cist = float(nm.get('min_num',0))
+                mins_cist = (q_next-1)*MINS_PER_QUART + min_cist
+                jugadora = str(nm.get('jugador',''))
+                accio_cist = move_str
+                va_anotar = 1
+                break
+        segons = round((min_abs_to - mins_cist)*60, 1) if mins_cist is not None else None
+        results.append({'equip_nom':eq_nom,'quart':quart,'min_timeout':round(min_abs_to,2),
+            'min_cistella':round(mins_cist,2) if mins_cist else None,
+            'segons_resposta':segons,'jugadora':jugadora,'accio':accio_cist,'va_anotar':va_anotar})
+    return results
+
+def save_timeouts(match_id, data_consulta, df, team_names):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM timeouts WHERE match_id=?", (match_id,))
+    results = analyze_timeouts(df, team_names)
+    for r in results:
+        con.execute(
+            "INSERT INTO timeouts (match_id,data_consulta,equip_nom,quart,min_timeout,min_cistella,segons_resposta,jugadora,accio,va_anotar) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (match_id,data_consulta,r['equip_nom'],r['quart'],r['min_timeout'],
+             r['min_cistella'],r['segons_resposta'],r['jugadora'],r['accio'],r['va_anotar']))
+    con.commit(); con.close()
+
+def load_timeouts_db():
+    con = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM timeouts ORDER BY data_consulta, min_timeout", con)
+    except:
+        df = pd.DataFrame()
+    con.close(); return df
 
 # Migració automàtica: afegir columnes noves si no existeixen a BD antigues
 def migrate_db():
     con = sqlite3.connect(DB_PATH)
     try:
         con.execute("ALTER TABLE stats_jugador ADD COLUMN minuts REAL DEFAULT 0")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        con.executescript("""
+        CREATE TABLE IF NOT EXISTS timeouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT, data_consulta TEXT,
+            equip_nom TEXT, quart INTEGER,
+            min_timeout REAL, min_cistella REAL,
+            segons_resposta REAL,
+            jugadora TEXT, accio TEXT,
+            va_anotar INTEGER
+        );""")
         con.commit()
     except Exception:
         pass
@@ -427,16 +502,16 @@ def get_shot_counts(df_sub):
 with st.sidebar:
     st.markdown("""<div style="display:flex;align-items:center;gap:10px;padding-bottom:14px;border-bottom:0.5px solid #e2e4e8;margin-bottom:14px">
         <div style="width:34px;height:34px;background:#E6F1FB;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px">🏀</div>
-        <div><div style="font-size:13px;font-weight:600;color:#1a1c22">Guillem Analítica</div>
-        <div style="font-size:11px;color:#9ca3af">Partits basquet català</div></div></div>""", unsafe_allow_html=True)
+        <div><div style="font-size:13px;font-weight:600;color:#1a1c22">Miki Analítica</div>
+        <div style="font-size:11px;color:#9ca3af">Analítica de Bàsquet</div></div></div>""", unsafe_allow_html=True)
 
     st.markdown('<div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:#9ca3af;margin-bottom:6px">Partit</div>', unsafe_allow_html=True)
     url_input = st.text_input("", placeholder="URL o ID del partit", label_visibility="collapsed")
 
     with st.expander("✏️ Noms dels equips", expanded=False):
         st.caption("Es guardaran per a futurs partits.")
-        nom_equip_1 = st.text_input("Equip local", placeholder="Ex: CB Manresa")
-        nom_equip_2 = st.text_input("Equip visitant", placeholder="Ex: Joventut")
+        nom_equip_1 = st.text_input("Equip local", placeholder="Ex: Miki Lakers")
+        nom_equip_2 = st.text_input("Equip visitant", placeholder="Ex: Mikinaikos")
 
     carregar = st.button("⬇ Carregar partit", use_container_width=True)
     st.markdown("---")
@@ -445,7 +520,7 @@ with st.sidebar:
     accio_cerca = st.text_input("Acció", placeholder="Cistella, falta...")
     jugador_cerca = st.text_input("Jugadora", placeholder="Nom...")
     st.markdown("---")
-    st.caption("Federació Catalana de Basquetbol")
+    st.caption("Miki Analítica")
 
 # ── Sessió ─────────────────────────────────────────────────────────────────────
 for k,v in [("df",None),("match_id",None),("team_names",{}),("score_a",0),("score_b",0)]:
@@ -493,6 +568,7 @@ if carregar and url_input:
                 save_partit(mid, df, noms.get(id_a,"A"), noms.get(id_b,"B"), id_a, id_b, fa, fb)
                 save_stats_jugador(mid, ts, df, teams_tmp, noms)
                 save_shots_zones(mid, ts, df, noms)
+                save_timeouts(mid, ts, df, noms)
                 st.session_state.df = df
                 st.session_state.match_id = mid
                 st.session_state.team_names = noms
@@ -506,7 +582,7 @@ if carregar and url_input:
 if st.session_state.df is None:
     st.markdown("""<div style="text-align:center;padding:80px 0">
         <div style="font-size:64px">🏀</div>
-        <h1 style="font-size:38px;font-weight:600;color:#1a1c22;margin:16px 0 8px">Guillem Analítica</h1>
+        <h1 style="font-size:38px;font-weight:600;color:#1a1c22;margin:16px 0 8px">Miki Analítica</h1>
         <p style="color:#6b7280;font-size:15px">Enganxa la URL o l'ID d'un partit al panell esquerre i prem Carregar.</p>
         <p style="color:#d1d5db;font-size:12px;margin-top:32px">Exemple: 69ec95d4339c3d0001f523a1</p>
     </div>""", unsafe_allow_html=True)
@@ -531,8 +607,8 @@ else:
 # ══════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════
-t1,t2,t3,t4,t5,t6 = st.tabs([
-    "🏀 Partit","👤 Jugadores","⏱ Ritme","📚 Històric","📈 Hist. Jugadores","🎯 Mapa de Tir"
+t1,t2,t3,t4,t5,t6,t7 = st.tabs([
+    "🏀 Partit","👤 Jugadores","⏱ Ritme","📚 Històric","📈 Hist. Jugadores","🎯 Mapa de Tir","🎬 Vídeo"
 ])
 
 # ══════════════════════════════════════════════════
@@ -870,6 +946,53 @@ with t3:
         fig_ef.update_traces(texttemplate="%{text}%",textposition="outside")
         st.plotly_chart(chart_style(fig_ef,260,"% Eficiència per quart"),use_container_width=True)
 
+    # ── Anàlisi de temps morts ────────────────────────────────────────────
+    st.markdown(sec("⏸ Temps morts — qui anota després?"), unsafe_allow_html=True)
+    st.caption("Primera cistella de l'equip que demana el temps mort, i quant triga a anotar-la.")
+
+    to_data = analyze_timeouts(df_orig, team_names)
+    if not to_data:
+        st.info("No s'han detectat temps morts en aquest partit.")
+    else:
+        df_to = pd.DataFrame(to_data)
+
+        # Mètriques generals
+        c1,c2,c3,c4 = st.columns(4)
+        total_to = len(df_to)
+        anotats = df_to["va_anotar"].sum()
+        efectivitat = round(anotats/total_to*100) if total_to>0 else 0
+        seg_mitjana = df_to[df_to["va_anotar"]==1]["segons_resposta"].mean()
+
+        with c1: st.markdown(card("Temps morts",total_to,"total","#374151"),unsafe_allow_html=True)
+        with c2: st.markdown(card("Anoten després",int(anotats),"cistella","#16a34a"),unsafe_allow_html=True)
+        with c3: st.markdown(card("Efectivitat",f"{efectivitat}%","","#185FA5"),unsafe_allow_html=True)
+        with c4: st.markdown(card("Seg. fins cistella",f"{seg_mitjana:.0f}s" if not pd.isna(seg_mitjana) else "—","mitjana","#d97706"),unsafe_allow_html=True)
+
+        # Taula detallada
+        df_to_show = df_to.copy()
+        df_to_show["Q"] = df_to_show["quart"]
+        df_to_show["Equip"] = df_to_show["equip_nom"]
+        df_to_show["Anota?"] = df_to_show["va_anotar"].map({1:"✅ Sí", 0:"❌ No"})
+        df_to_show["Jugadora"] = df_to_show["jugadora"]
+        df_to_show["Acció"] = df_to_show["accio"]
+        df_to_show["Seg."] = df_to_show["segons_resposta"].apply(lambda x: f"{x:.0f}s" if x and not pd.isna(x) else "—")
+        st.dataframe(df_to_show[["Q","Equip","Anota?","Jugadora","Acció","Seg."]],
+            use_container_width=True, hide_index=True)
+
+        # Gràfic per equip
+        if len(df_to) > 1:
+            resum_eq = df_to.groupby("equip_nom").agg(
+                Total=("va_anotar","count"),
+                Anotats=("va_anotar","sum"),
+                Seg_mitjana=("segons_resposta","mean")
+            ).reset_index()
+            resum_eq["Efectivitat %"] = (resum_eq["Anotats"]/resum_eq["Total"]*100).round(0)
+            fig_to = px.bar(resum_eq, x="equip_nom", y="Efectivitat %",
+                color="equip_nom", color_discrete_map=color_map_eq,
+                text="Efectivitat %", labels={"equip_nom":"Equip"})
+            fig_to.update_traces(texttemplate="%{text}%", textposition="outside")
+            st.plotly_chart(chart_style(fig_to, 220, "Efectivitat dels temps morts per equip"), use_container_width=True)
+
     st.markdown(sec("Momentum shifts"), unsafe_allow_html=True)
     st.caption("Runs de 5+ punts consecutius sense resposta del rival.")
     THRESHOLD=5; shift_rows=[]
@@ -1104,6 +1227,66 @@ with t5:
         elif len(jugs_comp)==1:
             st.info("Selecciona almenys 2 jugadores.")
 
+    # ── Històric temps morts ────────────────────────────────────────────────
+    st.markdown(sec("⏸ Efectivitat dels temps morts — temporada"), unsafe_allow_html=True)
+    df_to_hist = load_timeouts_db()
+    if df_to_hist.empty:
+        st.info("Consulta més partits per veure l'evolució dels temps morts.")
+    else:
+        df_pr_to = load_partits_db()
+        def lp_to(mid):
+            r = df_pr_to[df_pr_to["match_id"]==mid]
+            if r.empty: return mid[:8]+"..."
+            return f"{r.iloc[0]['nom_a']} vs {r.iloc[0]['nom_b']} ({r.iloc[0]['data_consulta'][:10]})"
+        df_to_hist["Partit"] = df_to_hist["match_id"].apply(lp_to)
+
+        equips_to = sorted(df_to_hist["equip_nom"].unique().tolist())
+        eq_to = st.selectbox("Equip", equips_to, key="eq_to_hist")
+
+        df_eq_to = df_to_hist[df_to_hist["equip_nom"]==eq_to]
+
+        # Evolució efectivitat per partit
+        evo = df_eq_to.groupby("Partit").agg(
+            Total=("va_anotar","count"),
+            Anotats=("va_anotar","sum"),
+            Seg_mit=("segons_resposta","mean")
+        ).reset_index()
+        evo["Efectivitat %"] = (evo["Anotats"]/evo["Total"]*100).round(0)
+
+        fig_to_evo = go.Figure()
+        fig_to_evo.add_trace(go.Scatter(
+            x=evo["Partit"], y=evo["Efectivitat %"],
+            mode="lines+markers", name="Efectivitat %",
+            line=dict(color=COLOR_A, width=2.5), marker=dict(size=8)))
+        fig_to_evo.add_hline(y=50, line_dash="dot", line_color="#e2e4e8",
+            annotation_text="50%", annotation_font_color="#9ca3af", annotation_font_size=10)
+        fig_to_evo.update_layout(yaxis=dict(range=[0,100], ticksuffix="%"))
+        fig_to_evo.update_xaxes(tickangle=-30)
+        st.plotly_chart(chart_style(fig_to_evo, 260, f"{eq_to} — efectivitat temps morts per partit"), use_container_width=True)
+
+        # Qui anota més després dels temps morts
+        df_anotades = df_eq_to[df_eq_to["va_anotar"]==1]
+        if not df_anotades.empty:
+            top_jug = df_anotades.groupby("jugadora").size().reset_index(name="Cistelles post-TM")
+            top_jug = top_jug.sort_values("Cistelles post-TM", ascending=False).head(8)
+            fig_jug_to = px.bar(top_jug, x="jugadora", y="Cistelles post-TM",
+                color_discrete_sequence=[COLOR_A], text="Cistelles post-TM",
+                labels={"jugadora":"Jugadora"})
+            fig_jug_to.update_traces(textposition="outside")
+            st.plotly_chart(chart_style(fig_jug_to, 240,
+                f"{eq_to} — qui anota després dels temps morts"), use_container_width=True)
+
+        # Temps mitjà de resposta per partit
+        fig_seg = go.Figure()
+        fig_seg.add_trace(go.Scatter(
+            x=evo["Partit"], y=evo["Seg_mit"],
+            mode="lines+markers", name="Seg. fins cistella",
+            line=dict(color="#d97706", width=2.5), marker=dict(size=8)))
+        fig_seg.update_xaxes(tickangle=-30)
+        fig_seg.update_yaxes(title="Segons")
+        st.plotly_chart(chart_style(fig_seg, 220,
+            f"{eq_to} — temps mitjà fins anotar després del temps mort"), use_container_width=True)
+
 # ══════════════════════════════════════════════════
 # TAB 6: MAPA DE TIR
 # ══════════════════════════════════════════════════
@@ -1234,3 +1417,140 @@ with t6:
                             st.dataframe(df_det,use_container_width=True,hide_index=True)
             else:
                 st.info("Consulta més partits per veure l'evolució per jugadora.")
+
+# ══════════════════════════════════════════════════
+# TAB 7: ANÀLISI DE VÍDEO
+# ══════════════════════════════════════════════════
+with t7:
+    st.markdown(sec("🎬 Anàlisi de vídeo — carrega els CSV del notebook"), unsafe_allow_html=True)
+    st.caption("Carrega els fitxers generats pel notebook de Google Colab per veure les dades del vídeo.")
+
+    col_u1, col_u2, col_u3 = st.columns(3)
+    with col_u1:
+        f_accions  = st.file_uploader("CSV d'accions", type="csv", key="up_accions",
+                                       help="dades_partit_accions.csv")
+    with col_u2:
+        f_tracking = st.file_uploader("CSV de tracking", type="csv", key="up_tracking",
+                                       help="dades_partit_tracking.csv")
+    with col_u3:
+        f_resum    = st.file_uploader("CSV de resum", type="csv", key="up_resum",
+                                       help="dades_partit_resum.csv")
+
+    if f_accions is None:
+        st.info("Carrega almenys el CSV d'accions per començar.")
+    else:
+        df_vid_acc = pd.read_csv(f_accions)
+        df_vid_tra = pd.read_csv(f_tracking) if f_tracking else pd.DataFrame()
+        df_vid_res = pd.read_csv(f_resum)    if f_resum    else pd.DataFrame()
+
+        st.success(f"✅ {len(df_vid_acc)} accions carregades")
+
+        # ── Mètriques generals ──────────────────────────────────────────
+        st.markdown(sec("Resum del partit"), unsafe_allow_html=True)
+        equips_vid = [e for e in df_vid_acc["equip"].unique() if e and e != "?"]
+
+        cols_m = st.columns(len(equips_vid) * 3 + 1)
+        idx = 0
+        cols_m[idx].markdown(card("Accions totals", len(df_vid_acc), "", "#374151"), unsafe_allow_html=True)
+        idx += 1
+        for eq in equips_vid:
+            df_e = df_vid_acc[df_vid_acc["equip"] == eq]
+            color_e = COLOR_A if idx <= 3 else COLOR_B
+            cist  = int((df_e["tipus"] == "cistella").sum())
+            falts = int((df_e["tipus"] == "falta").sum())
+            tfall = int((df_e["tipus"] == "tir_fallat").sum())
+            cols_m[idx].markdown(card(f"Cistelles {eq}", cist, "", color_e), unsafe_allow_html=True); idx+=1
+            cols_m[idx].markdown(card(f"Faltes {eq}", falts, "", color_e), unsafe_allow_html=True); idx+=1
+            cols_m[idx].markdown(card(f"Tirs fallats {eq}", tfall, "", color_e), unsafe_allow_html=True); idx+=1
+
+        # ── Gràfic accions per equip ────────────────────────────────────
+        st.markdown(sec("Accions per equip i tipus"), unsafe_allow_html=True)
+        df_grp = df_vid_acc[df_vid_acc["equip"].isin(equips_vid)].groupby(["equip","tipus"]).size().reset_index(name="n")
+        if not df_grp.empty:
+            pal = {equips_vid[0]: COLOR_A, equips_vid[1]: COLOR_B} if len(equips_vid) >= 2 else {equips_vid[0]: COLOR_A}
+            fig_a = px.bar(df_grp, x="tipus", y="n", color="equip", barmode="group",
+                color_discrete_map=pal,
+                labels={"tipus":"Tipus","n":"Accions","equip":"Equip"})
+            fig_a.update_layout(xaxis_title="", paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                font=dict(color="#374151",family="Inter"),
+                legend=dict(bgcolor="#ffffff",bordercolor="#e2e4e8",borderwidth=1,title=""),
+                margin=dict(l=0,r=0,t=30,b=0),height=280)
+            st.plotly_chart(fig_a, use_container_width=True)
+
+        # ── Accions per quart ───────────────────────────────────────────
+        st.markdown(sec("Accions per quart"), unsafe_allow_html=True)
+        if "quart" in df_vid_acc.columns:
+            df_q = df_vid_acc[df_vid_acc["equip"].isin(equips_vid)].groupby(["quart","equip","tipus"]).size().reset_index(name="n")
+            cistelles_q = df_q[df_q["tipus"]=="cistella"]
+            if not cistelles_q.empty:
+                pal = {equips_vid[0]: COLOR_A, equips_vid[1]: COLOR_B} if len(equips_vid) >= 2 else {equips_vid[0]: COLOR_A}
+                fig_q = px.bar(cistelles_q, x="quart", y="n", color="equip", barmode="group",
+                    color_discrete_map=pal,
+                    labels={"quart":"Quart","n":"Cistelles","equip":"Equip"})
+                fig_q.update_layout(paper_bgcolor="#ffffff",plot_bgcolor="#ffffff",
+                    font=dict(color="#374151",family="Inter"),
+                    legend=dict(bgcolor="#ffffff",bordercolor="#e2e4e8",borderwidth=1,title=""),
+                    margin=dict(l=0,r=0,t=30,b=0),height=260)
+                st.plotly_chart(fig_q, use_container_width=True)
+
+        # ── Evolució del marcador (des de les accions del vídeo) ────────
+        st.markdown(sec("Evolució del marcador"), unsafe_allow_html=True)
+        if "marcador" in df_vid_acc.columns:
+            df_marc = df_vid_acc[df_vid_acc["marcador"].str.contains("-", na=False)].copy()
+            if not df_marc.empty:
+                try:
+                    df_marc["scoreA"] = df_marc["marcador"].str.split("-").str[0].astype(int)
+                    df_marc["scoreB"] = df_marc["marcador"].str.split("-").str[1].astype(int)
+                    df_marc = df_marc.sort_values("temps_joc")
+                    fig_m = go.Figure()
+                    fig_m.add_trace(go.Scatter(x=df_marc["temps_joc"]/60, y=df_marc["scoreA"],
+                        name=equips_vid[0] if equips_vid else "Local",
+                        line=dict(color=COLOR_A,width=2.5),mode="lines"))
+                    fig_m.add_trace(go.Scatter(x=df_marc["temps_joc"]/60, y=df_marc["scoreB"],
+                        name=equips_vid[1] if len(equips_vid)>1 else "Visitant",
+                        line=dict(color=COLOR_B,width=2.5),mode="lines"))
+                    fig_m.update_layout(paper_bgcolor="#ffffff",plot_bgcolor="#ffffff",
+                        font=dict(color="#374151",family="Inter"),
+                        xaxis=dict(title="Minut de joc",showgrid=False,color="#9ca3af"),
+                        yaxis=dict(title="Punts",showgrid=True,gridcolor="#f3f4f6",color="#9ca3af"),
+                        legend=dict(bgcolor="#ffffff",bordercolor="#e2e4e8",borderwidth=1,title="",
+                                    orientation="h",yanchor="bottom",y=1.02,xanchor="right",x=1),
+                        margin=dict(l=0,r=0,t=40,b=0),height=280)
+                    st.plotly_chart(fig_m, use_container_width=True)
+                except:
+                    st.info("No s'ha pogut generar l'evolució del marcador.")
+
+        # ── Taula d'accions ─────────────────────────────────────────────
+        st.markdown(sec("Totes les accions"), unsafe_allow_html=True)
+        col_eq_f, col_tip_f = st.columns(2)
+        with col_eq_f:
+            eq_filter = st.selectbox("Equip", ["Tots"] + equips_vid, key="vid_eq_f")
+        with col_tip_f:
+            tip_filter = st.selectbox("Tipus", ["Tots","cistella","tir_fallat","falta","rebot","altre"], key="vid_tip_f")
+
+        df_show = df_vid_acc.copy()
+        if eq_filter != "Tots":
+            df_show = df_show[df_show["equip"] == eq_filter]
+        if tip_filter != "Tots":
+            df_show = df_show[df_show["tipus"] == tip_filter]
+
+        st.caption(f"{len(df_show)} accions")
+        st.dataframe(df_show[["quart","jugadora","equip","accio","tipus","marcador"]].rename(
+            columns={"quart":"Q","jugadora":"Jugadora","equip":"Equip",
+                     "accio":"Acció","tipus":"Tipus","marcador":"Marc"}),
+            use_container_width=True, hide_index=True, height=350)
+
+        # ── Resum de tracking (si disponible) ───────────────────────────
+        if not df_vid_res.empty:
+            st.markdown(sec("Presència en pantalla per jugadora"), unsafe_allow_html=True)
+            st.caption("Basada en el tracking del vídeo — quant temps apareix cada ID a càmera.")
+            st.dataframe(df_vid_res.sort_values("minuts_visibles", ascending=False).rename(
+                columns={"track_id":"ID","equip":"Equip","aparicions":"Frames",
+                         "minuts_visibles":"Minuts visibles"}),
+                use_container_width=True, hide_index=True)
+
+        # ── Descàrrega combinada ────────────────────────────────────────
+        st.markdown("---")
+        csv_exp = df_vid_acc.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇ Descarregar accions CSV", csv_exp,
+            "accions_video.csv", "text/csv")
